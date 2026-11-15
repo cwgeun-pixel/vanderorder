@@ -19,6 +19,7 @@
     </div>
   </header>
 
+  <nav id="stores" class="stores" aria-label="가게 선택" hidden></nav>
   <nav id="tabs" class="tabs" aria-label="밴더 목록"></nav>
 
   <main id="panel" class="panel"></main>
@@ -47,10 +48,7 @@
     <form method="dialog" class="dialog-body" id="settings-form">
       <h2>설정</h2>
 
-      <label class="field">
-        <span>가게 이름 (메시지 머리글, 선택)</span>
-        <input id="set-store" type="text" placeholder="예: 우리가게" autocomplete="off" />
-      </label>
+      <p class="hint">가게 이름·밴더·품목은 메인 화면의 [편집]에서 바꿉니다.</p>
 
       <label class="field">
         <span>텔레그램 봇 토큰</span>

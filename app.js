@@ -16,10 +16,8 @@ function makeItem(name, unit = '', qty = 1, checked = false) {
   return { id: uid(), name, unit, qty, checked };
 }
 
-function defaultState() {
-  return {
-    settings: { storeName: '', botToken: '', chatId: '' },
-    vendors: [
+function defaultVendors() {
+  return [
       {
         id: uid(), name: '밴더 A', chatId: '', memo: '',
         items: [makeItem('예시 품목 1', '박스'), makeItem('예시 품목 2', 'kg'), makeItem('예시 품목 3', '개')],
@@ -28,19 +26,53 @@ function defaultState() {
         id: uid(), name: '밴더 B', chatId: '', memo: '',
         items: [makeItem('예시 품목 1', '박스'), makeItem('예시 품목 2', '봉')],
       },
-    ],
+  ];
+}
+
+function makeStore(name, vendors = defaultVendors()) {
+  return { id: uid(), name, vendors };
+}
+
+function defaultState() {
+  const first = makeStore('우리 가게');
+  return {
+    settings: { botToken: '', chatId: '' },
+    stores: [first],
+    activeStoreId: first.id,
     history: [],
   };
 }
 
 function normalize(s) {
+  s = s || {};
   const d = defaultState();
+  let stores;
+  if (Array.isArray(s.stores) && s.stores.length) stores = s.stores;
+  else if (Array.isArray(s.vendors)) {
+    // 이전 버전(가게 1개) 데이터 → 가게 목록으로 옮기기
+    stores = [{ name: (s.settings && s.settings.storeName) || '우리 가게', vendors: s.vendors }];
+  } else stores = d.stores;
+
   const out = {
-    settings: { ...d.settings, ...(s && s.settings) },
-    vendors: Array.isArray(s && s.vendors) ? s.vendors : d.vendors,
-    history: Array.isArray(s && s.history) ? s.history : [],
+    settings: { botToken: '', chatId: '' },
+    stores: stores.map((st) => ({
+      id: st.id || uid(),
+      name: String(st.name || '이름 없는 가게'),
+      vendors: normalizeVendors(st.vendors),
+    })),
+    activeStoreId: s.activeStoreId,
+    history: Array.isArray(s.history) ? s.history : [],
   };
-  out.vendors = out.vendors.map((v) => ({
+  if (s.settings) {
+    out.settings.botToken = String(s.settings.botToken || '');
+    out.settings.chatId = String(s.settings.chatId || '');
+  }
+  if (!out.stores.some((st) => st.id === out.activeStoreId)) out.activeStoreId = out.stores[0].id;
+  return out;
+}
+
+function normalizeVendors(vendors) {
+  return (Array.isArray(vendors) ? vendors : []).map((v) => ({
     id: v.id || uid(),
     name: String(v.name || '이름 없음'),
     chatId: String(v.chatId || ''),
@@ -53,7 +85,14 @@ function normalize(s) {
       checked: !!it.checked,
     })),
   }));
-  return out;
+}
+
+/* 가게를 복사할 때: 밴더·품목·수량은 그대로, 체크와 메모는 비움 */
+function cloneVendors(vendors) {
+  return vendors.map((v) => ({
+    ...v, id: uid(), memo: '',
+    items: v.items.map((it) => ({ ...it, id: uid(), checked: false })),
+  }));
 }
 
 function load() {
@@ -75,7 +114,8 @@ function save() {
 }
 
 let state = load();
-let activeId = state.vendors[0] ? state.vendors[0].id : null;
+const store = () => state.stores.find((st) => st.id === state.activeStoreId) || state.stores[0];
+let activeId = store().vendors[0] ? store().vendors[0].id : null;
 let editMode = false;
 
 const $ = (sel) => document.querySelector(sel);
@@ -87,13 +127,14 @@ function toNum(v) {
 }
 const fmtQty = (n) => String(toNum(n));
 
-const activeVendor = () => state.vendors.find((v) => v.id === activeId) || state.vendors[0];
+const activeVendor = () => store().vendors.find((v) => v.id === activeId) || store().vendors[0];
 const findItem = (v, id) => v.items.find((it) => it.id === id);
 const orderedItems = (v) => v.items.filter((it) => it.checked && toNum(it.qty) > 0 && it.name.trim());
 
 /* ---------------- 렌더링 ---------------- */
 
 function render() {
+  renderStores();
   renderTabs();
   renderPanel();
   $('#btn-edit').textContent = editMode ? '완료' : '편집';
@@ -101,8 +142,22 @@ function render() {
   $('.actionbar').hidden = editMode;
 }
 
+function renderStores() {
+  const bar = $('#stores');
+  // 가게가 1개뿐이면 평소에는 숨기고, 편집 중일 때만 [+ 가게 추가]를 보여줌
+  if (state.stores.length < 2 && !editMode) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const btns = state.stores.map((st) => {
+    const n = st.vendors.reduce((sum, v) => sum + orderedItems(v).length, 0);
+    return `<button type="button" class="store ${st.id === store().id ? 'active' : ''}" data-store="${esc(st.id)}">
+      🏪 ${esc(st.name)}${n ? `<span class="badge">${n}</span>` : ''}</button>`;
+  });
+  if (editMode) btns.push('<button type="button" class="store add" data-action="add-store">+ 가게 추가</button>');
+  bar.innerHTML = btns.join('');
+}
+
 function renderTabs() {
-  const tabs = state.vendors.map((v) => {
+  const tabs = store().vendors.map((v) => {
     const n = orderedItems(v).length;
     return `<button type="button" class="tab ${v.id === activeId ? 'active' : ''}" data-vendor="${esc(v.id)}">
       ${esc(v.name)}${n ? `<span class="badge">${n}</span>` : ''}</button>`;
@@ -115,13 +170,20 @@ function renderPanel() {
   const v = activeVendor();
   const panel = $('#panel');
   if (!v) {
-    panel.innerHTML = '<p class="empty">밴더가 없습니다. [편집]에서 밴더를 추가하세요.</p>';
+    panel.innerHTML = editMode
+      ? `<label class="section-label">가게 이름 (주문 메시지 머리글)</label>
+         <input class="vendor-name-input" data-field="store-name" type="text" value="${esc(store().name)}" />
+         <p class="empty">밴더가 없습니다. 위의 [+ 밴더 추가]를 누르세요.</p>
+         ${state.stores.length > 1 ? '<div class="vendor-tools"><button type="button" class="btn small danger" data-action="delete-store">이 가게 삭제</button></div>' : ''}`
+      : '<p class="empty">밴더가 없습니다. [편집]에서 밴더를 추가하세요.</p>';
     return;
   }
   activeId = v.id;
 
   if (editMode) {
     panel.innerHTML = `
+      <label class="section-label">가게 이름 (주문 메시지 머리글)</label>
+      <input class="vendor-name-input" data-field="store-name" type="text" value="${esc(store().name)}" />
       <label class="section-label">밴더 이름</label>
       <input class="vendor-name-input field-input" data-field="vendor-name" type="text" value="${esc(v.name)}" />
       <label class="section-label">품목 (이름 / 단위)</label>
@@ -133,6 +195,7 @@ function renderPanel() {
       </form>
       <div class="vendor-tools">
         <button type="button" class="btn small danger" data-action="delete-vendor">이 밴더 삭제</button>
+        ${state.stores.length > 1 ? '<button type="button" class="btn small danger" data-action="delete-store">이 가게 삭제</button>' : ''}
       </div>`;
     return;
   }
@@ -179,6 +242,7 @@ function refreshItem(v, it) {
     const q = li.querySelector('[data-field="qty"]');
     if (document.activeElement !== q) q.value = fmtQty(it.qty);
   }
+  renderStores();
   renderTabs();
 }
 
@@ -188,16 +252,35 @@ $('#tabs').addEventListener('click', (e) => {
   const btn = e.target.closest('button');
   if (!btn) return;
   if (btn.dataset.action === 'add-vendor') {
-    const name = prompt('새 밴더 이름', `밴더 ${String.fromCharCode(65 + state.vendors.length)}`);
+    const name = prompt('새 밴더 이름', `밴더 ${String.fromCharCode(65 + store().vendors.length)}`);
     if (!name || !name.trim()) return;
     const v = { id: uid(), name: name.trim(), chatId: '', memo: '', items: [] };
-    state.vendors.push(v);
+    store().vendors.push(v);
     activeId = v.id;
     save();
     render();
     return;
   }
   activeId = btn.dataset.vendor;
+  render();
+});
+
+$('#stores').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  if (btn.dataset.action === 'add-store') {
+    const name = prompt('새 가게 이름', '');
+    if (!name || !name.trim()) return;
+    const cur = store();
+    const copy = confirm(`'${cur.name}'의 밴더와 품목을 그대로 복사할까요?\n\n[확인] 복사해서 시작\n[취소] 빈 가게로 시작`);
+    const st = makeStore(name.trim(), copy ? cloneVendors(cur.vendors) : []);
+    state.stores.push(st);
+    state.activeStoreId = st.id;
+  } else {
+    state.activeStoreId = btn.dataset.store;
+  }
+  activeId = store().vendors[0] ? store().vendors[0].id : null;
+  save();
   render();
 });
 
@@ -243,11 +326,22 @@ $('#panel').addEventListener('click', (e) => {
       return;
     case 'delete-vendor':
       if (!confirm(`'${v.name}' 밴더와 품목을 모두 삭제할까요?`)) return;
-      state.vendors = state.vendors.filter((x) => x !== v);
-      activeId = state.vendors[0] ? state.vendors[0].id : null;
+      store().vendors = store().vendors.filter((x) => x !== v);
+      activeId = store().vendors[0] ? store().vendors[0].id : null;
       save();
       render();
       return;
+    case 'delete-store': {
+      const st = store();
+      if (state.stores.length < 2) return;
+      if (!confirm(`'${st.name}' 가게와 그 밴더·품목을 모두 삭제할까요?`)) return;
+      state.stores = state.stores.filter((x) => x !== st);
+      state.activeStoreId = state.stores[0].id;
+      activeId = store().vendors[0] ? store().vendors[0].id : null;
+      save();
+      render();
+      return;
+    }
     default:
       return;
   }
@@ -258,6 +352,12 @@ $('#panel').addEventListener('click', (e) => {
 $('#panel').addEventListener('input', (e) => {
   const field = e.target.dataset.field;
   if (!field) return;
+  if (field === 'store-name') {
+    store().name = e.target.value;
+    renderStores();
+    save();
+    return;
+  }
   const v = activeVendor();
   const li = e.target.closest('[data-item]');
   const it = li ? findItem(v, li.dataset.item) : null;
@@ -276,6 +376,11 @@ $('#panel').addEventListener('input', (e) => {
 
 $('#panel').addEventListener('focusout', (e) => {
   if (e.target.dataset.field === 'qty') e.target.value = fmtQty(e.target.value);
+  if (e.target.dataset.field === 'store-name' && !e.target.value.trim()) {
+    store().name = '이름 없는 가게';
+    save();
+    render();
+  }
   if (e.target.dataset.field === 'vendor-name' && !e.target.value.trim()) {
     activeVendor().name = '이름 없음';
     save();
@@ -317,9 +422,9 @@ function formatDate(d) {
 
 function buildMessage(v, now = new Date()) {
   const items = orderedItems(v);
-  const store = state.settings.storeName.trim();
+  const storeName = store().name.trim();
   const lines = [
-    `📦 ${store ? `[${store}] ` : ''}${v.name} 주문`,
+    `📦 ${storeName ? `[${storeName}] ` : ''}${v.name} 주문`,
     `📅 ${formatDate(now)}`,
     '',
     ...items.map((it, i) => `${i + 1}. ${it.name.trim()} — ${fmtQty(it.qty)}${it.unit.trim() ? ' ' + it.unit.trim() : ''}`),
@@ -367,7 +472,7 @@ $('#btn-preview').addEventListener('click', () => {
   if (!v) return;
   const n = orderedItems(v).length;
   if (!n) { toast('체크된 품목이 없습니다.', true); return; }
-  $('#preview-title').textContent = `${v.name} 주문 미리보기`;
+  $('#preview-title').textContent = `${store().name} · ${v.name} 주문 미리보기`;
   $('#preview-text').textContent = buildMessage(v);
   const chat = targetChat(v);
   $('#preview-target').textContent = chat ? `받는 채팅 ID: ${chat}` : '⚠ 받는 채팅 ID가 없습니다. [설정]에서 입력하세요.';
@@ -395,11 +500,11 @@ $('#btn-send').addEventListener('click', async () => {
   btn.textContent = '보내는 중…';
   try {
     await tg('sendMessage', { chat_id: chat, text });
-    state.history.unshift({ at: new Date().toISOString(), vendor: v.name, text });
+    state.history.unshift({ at: new Date().toISOString(), store: store().name, vendor: v.name, text });
     state.history = state.history.slice(0, HISTORY_LIMIT);
     save();
     $('#dlg-preview').close();
-    toast(`✅ ${v.name} 주문을 보냈습니다.`);
+    toast(`✅ ${store().name} · ${v.name} 주문을 보냈습니다.`);
   } catch (e) {
     toast(e.message, true);
     btn.disabled = false;
@@ -412,16 +517,16 @@ $('#btn-send').addEventListener('click', async () => {
 
 function openSettings() {
   const s = state.settings;
-  $('#set-store').value = s.storeName;
   $('#set-token').value = s.botToken;
   $('#set-chat').value = s.chatId;
   $('#set-token').type = 'password';
   $('#set-show-token').checked = false;
   $('#chat-candidates').innerHTML = '';
-  $('#vendor-chats').innerHTML = state.vendors.map((v) => `
-    <label class="field"><span>${esc(v.name)}</span>
+  const multi = state.stores.length > 1;
+  $('#vendor-chats').innerHTML = state.stores.flatMap((st) => st.vendors.map((v) => `
+    <label class="field"><span>${multi ? `${esc(st.name)} · ` : ''}${esc(v.name)}</span>
       <input type="text" data-vendor-chat="${esc(v.id)}" value="${esc(v.chatId)}" placeholder="기본값 사용" autocomplete="off" spellcheck="false" />
-    </label>`).join('') || '<p class="hint">밴더가 없습니다.</p>';
+    </label>`)).join('') || '<p class="hint">밴더가 없습니다.</p>';
   renderHistory();
   $('#dlg-settings').showModal();
 }
@@ -432,7 +537,7 @@ function renderHistory() {
     ? h.map((r) => {
       const d = new Date(r.at);
       const when = `${formatDate(d)} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-      return `<details><summary>${esc(when)} · ${esc(r.vendor)}</summary><pre>${esc(r.text)}</pre></details>`;
+      return `<details><summary>${esc(when)} · ${r.store ? `${esc(r.store)} · ` : ''}${esc(r.vendor)}</summary><pre>${esc(r.text)}</pre></details>`;
     }).join('')
     : '<p class="hint">아직 보낸 주문이 없습니다.</p>';
 }
@@ -451,11 +556,10 @@ $('#set-show-token').addEventListener('change', (e) => {
 });
 
 $('#btn-save-settings').addEventListener('click', () => {
-  state.settings.storeName = $('#set-store').value.trim();
   state.settings.botToken = $('#set-token').value.trim();
   state.settings.chatId = $('#set-chat').value.trim();
   document.querySelectorAll('[data-vendor-chat]').forEach((inp) => {
-    const v = state.vendors.find((x) => x.id === inp.dataset.vendorChat);
+    const v = state.stores.flatMap((st) => st.vendors).find((x) => x.id === inp.dataset.vendorChat);
     if (v) v.chatId = inp.value.trim();
   });
   save();
@@ -528,12 +632,12 @@ $('#file-import').addEventListener('change', async (e) => {
   if (!file) return;
   try {
     const data = JSON.parse(await file.text());
-    if (!Array.isArray(data.vendors)) throw new Error('형식 오류');
+    if (!Array.isArray(data.stores) && !Array.isArray(data.vendors)) throw new Error('형식 오류');
     if (!confirm('지금 품목/설정을 백업 파일 내용으로 바꿀까요? (봇 토큰은 유지됩니다)')) return;
     const token = state.settings.botToken;
     state = normalize(data);
     if (!state.settings.botToken) state.settings.botToken = token;
-    activeId = state.vendors[0] ? state.vendors[0].id : null;
+    activeId = store().vendors[0] ? store().vendors[0].id : null;
     save();
     $('#dlg-settings').close();
     render();
